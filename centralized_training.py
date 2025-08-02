@@ -1,5 +1,4 @@
 """Centralized Q-Learning for Multi-Agent Systems.
-
 Main implementation of the centralized Q-learning algorithm with environment
 management and training capabilities.
 """
