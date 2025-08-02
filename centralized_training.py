@@ -17,6 +17,8 @@ from base_classes import (
     GlobalAgentTransition, LocalAgentTransition,
     GlobalAgentReward, LocalAgentReward
 )
+import itertools
+
 
 class CentralizedEnvironment:
     """Environment managing global and local agents with custom transitions and rewards."""
@@ -47,6 +49,7 @@ class CentralizedEnvironment:
         current_global_state = self.global_agent.get_state()
         current_local_states = [agent.get_state() for agent in self.local_agents]
         
+        ###### something is weird here... getting reward before choosing actions?? should first choose actions then get rewards and finally transition states
         # Compute reward
         reward = self.compute_reward(current_global_state, global_action, 
                                    current_local_states, local_actions)
@@ -55,9 +58,11 @@ class CentralizedEnvironment:
         next_global_state = self.global_transition.sample_next_state(current_global_state, global_action)
         next_local_states = []
         
+        # Local agent's state evolves as s_i' ~ P_l(.|s_i, s_g, a_i)
         for i, local_action in enumerate(local_actions):
+            current_local_state = current_local_states[i]
             next_local_state = self.local_transition.sample_next_state(
-                current_global_state, global_action, local_action)
+                current_local_state, current_global_state, local_action)
             next_local_states.append(next_local_state)
         
         # Update agent states
@@ -87,14 +92,13 @@ class CentralizedEnvironment:
 
 class CentralizedQLearning:
     """Centralized Q-learning algorithm for multi-agent system."""
-    
     def __init__(self, 
-                 environment: CentralizedEnvironment,
-                 learning_rate: float = 0.1,
-                 discount_factor: float = 0.9,
-                 epsilon: float = 0.1,
-                 epsilon_decay: float = 0.995,
-                 min_epsilon: float = 0.01):
+                environment: CentralizedEnvironment,
+                learning_rate: float = 0.3,
+                discount_factor: float = 0.9,
+                epsilon: float = 0.1,
+                epsilon_decay: float = 0.995,
+                min_epsilon: float = 0.01):
         self.env = environment
         self.lr = learning_rate
         self.gamma = discount_factor
@@ -124,7 +128,6 @@ class CentralizedQLearning:
     
     def _get_local_action_combinations(self) -> List[List[Action]]:
         """Get all combinations of local actions."""
-        import itertools
         action_spaces = [agent.action_space for agent in self.env.local_agents]
         return list(itertools.product(*action_spaces))
     
@@ -323,54 +326,55 @@ class CentralizedQLearning:
 def create_simple_example():
     """Create a simple example to demonstrate the algorithm."""
     # Create simple discrete state and action spaces
-    global_states = [DiscreteState(i) for i in range(5)]
-    global_actions = [DiscreteAction(i) for i in range(3)]
-    local_states = [DiscreteState(i) for i in range(3)]
-    local_actions = [DiscreteAction(i) for i in range(2)]
+    global_agent_states = [DiscreteState(i) for i in range(5)]
+    global_agent_actions = [DiscreteAction(i) for i in range(3)]
+    local_agent_states = [DiscreteState(i) for i in range(3)]
+    local_agent_actions = [DiscreteAction(i) for i in range(2)]
     
     # Create agents
-    global_agent = GlobalAgent(global_states, global_actions)
-    local_agents = [LocalAgent(i, local_states, local_actions) for i in range(2)]
+    n = 8
+    global_agent = GlobalAgent(global_agent_states, global_agent_actions)
+    local_agents = [LocalAgent(i, local_agent_states, local_agent_actions) for i in range(n)]
     
     # Create simple transition functions
-    global_transitions = {}
-    for gs in global_states:
-        for ga in global_actions:
+    global_agent_transitions = {}
+    for gs in global_agent_states:
+        for ga in global_agent_actions:
             # Simple random transitions
-            next_state_probs = {s: 1.0/len(global_states) for s in global_states}
-            global_transitions[(gs, ga)] = next_state_probs
+            next_state_probs = {s: 1.0/len(global_agent_states) for s in global_agent_states}
+            global_agent_transitions[(gs, ga)] = next_state_probs
     
-    local_transitions = {}
-    for gs in global_states:
-        for ga in global_actions:
-            for la in local_actions:
+    local_agent_transitions = {}
+    for ls in local_agent_states:
+        for gs in global_agent_states:
+            for la in local_agent_actions:
                 # Simple random transitions
-                next_state_probs = {s: 1.0/len(local_states) for s in local_states}
-                local_transitions[(gs, ga, la)] = next_state_probs
+                next_state_probs = {s: 1.0/len(local_agent_states) for s in local_agent_states}
+                local_agent_transitions[(ls, gs, la)] = next_state_probs
     
-    global_transition = GlobalAgentTransition(global_transitions)
-    local_transition = LocalAgentTransition(local_transitions)
+    global_agent_transition = GlobalAgentTransition(global_agent_transitions)
+    local_agent_transition = LocalAgentTransition(local_agent_transitions)
     
     # Create simple reward functions
-    def simple_global_reward(global_state: State, global_action: Action) -> float:
+    def simple_global_agent_reward(global_state: State, global_action: Action) -> float:
         return 1.0 if global_action.value == 0 else -0.1
     
-    def simple_local_reward(local_state: State, global_state: State, local_action: Action) -> float:
+    def simple_local_agent_reward(local_state: State, global_state: State, local_action: Action) -> float:
         return 0.5 if local_action.value == 1 else -0.1
     
-    global_reward = GlobalAgentReward(simple_global_reward)
-    local_reward = LocalAgentReward(simple_local_reward)
+    global_agent_reward = GlobalAgentReward(simple_global_agent_reward)
+    local_agent_reward = LocalAgentReward(simple_local_agent_reward)
     
     # Create environment
     env = CentralizedEnvironment(
-        global_agent, local_agents, global_transition, local_transition,
-        global_reward, local_reward
+        global_agent, local_agents, global_agent_transition, local_agent_transition,
+        global_agent_reward, local_agent_reward
     )
     
     # Create Q-learning algorithm
-    q_learner = CentralizedQLearning(env, learning_rate=0.1, discount_factor=0.9)
+    q_learner = CentralizedQLearning(env, learning_rate=0.3, discount_factor=0.9)
     
-    return q_learner, global_states[0], [local_states[0], local_states[0]]
+    return q_learner, global_agent_states[0], [local_agent_states[0], local_agent_states[0]]
 
 
 if __name__ == "__main__":
@@ -381,7 +385,7 @@ if __name__ == "__main__":
     print("Starting training...")
     training_results = q_learner.train(
         initial_global_state, initial_local_states,
-        num_episodes=500, max_steps_per_episode=50
+        num_episodes=750, max_steps_per_episode=100
     )
     
     print("Plotting results...")

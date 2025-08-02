@@ -135,13 +135,17 @@ class GlobalAgentTransition(TransitionFunction):
         return np.random.choice(next_states, p=probs)
 
 class LocalAgentTransition(TransitionFunction):
-    """Transition function for local agent: s_i' ~ P_l(.|s_g, a_g, a_i)"""
-    def __init__(self, transition_probs: Dict[Tuple[State, Action, Action], Dict[State, float]]):
+    """Transition function for local agent: s_i' ~ P_l(.|s_i, s_g, a_i)"""
+    def __init__(self, transition_probs: Dict[Tuple[State, State, Action], Dict[State, float]]):
         self.transition_probs = transition_probs
     
-    def sample_next_state(self, global_state: State, global_action: Action, local_action: Action) -> State:
-        """Sample next local state given global state, global action, and local action."""
-        key = (global_state, global_action, local_action)        
+    def sample_next_state(self, local_state: State, global_state: State, local_action: Action) -> State:
+        """Sample next local state given current local state, global state, and local action."""
+        key = (local_state, global_state, local_action)        
+        if key not in self.transition_probs:
+            # Default transition - could be customized
+            return DiscreteState(np.random.randint(0, 10))  # Default behavior
+        
         next_states = list(self.transition_probs[key].keys())
         probs = list(self.transition_probs[key].values())
         return np.random.choice(next_states, p=probs)
