@@ -1,4 +1,7 @@
 numpy>=1.21.0
 matplotlib>=3.5.0
 pickle-mixin>=1.0.2
-numba>=0.56.0
+numba
+torch
+torchvision>=0.15.0
+scipy
