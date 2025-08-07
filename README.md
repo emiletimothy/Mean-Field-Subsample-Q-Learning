@@ -11,7 +11,7 @@ The algorithm implements a centralized Q-function that considers:
 ### Key Features
 
 - **Modular Design**: Easy to extend with custom states, actions, transitions, and rewards
-- **Centralized Q-Learning**: Implements the Bellman update equation
+- **Centralized Q-Learning**: Expected Bellman backup `E_{s'}[max_{a'} Q(s',a')]` using the transition model (exact enumeration when feasible; Monte Carlo sampling otherwise)
 - **Training Metrics**: Tracks rewards and computation time during training
 - **Visualization**: Built-in plotting for training curves and performance analysis
 - **Model Persistence**: Save and load trained models
@@ -63,10 +63,10 @@ This will:
 
 #### Environment
 - `CentralizedEnvironment`: Orchestrates multi-agent interactions
-- `GlobalTransition`: Implements global state transitions
-- `LocalTransition`: Implements local state transitions
-- `GlobalReward`: Computes global rewards
-- `LocalReward`: Computes local rewards
+- `GlobalAgentTransition`: Implements global state transitions
+- `LocalAgentTransition`: Implements local state transitions
+- `GlobalAgentReward`: Computes global rewards
+- `LocalAgentReward`: Computes local rewards
 
 #### Learning Algorithm
 - `CentralizedQLearning`: Main Q-learning implementation with Bellman updates
@@ -97,17 +97,16 @@ def custom_local_reward(local_state, global_state, local_action):
 # Create environment with custom transitions and rewards
 env = CentralizedEnvironment(
     global_agent, local_agents, 
-    global_transition, local_transition,
-    GlobalReward(custom_global_reward),
-    LocalReward(custom_local_reward)
+    global_agent_transition, local_agent_transition,
+    GlobalAgentReward(custom_global_reward),
+    LocalAgentReward(custom_local_reward)
 )
 
 # Initialize Q-learning
 q_learner = CentralizedQLearning(
     env, 
     learning_rate=0.1,
-    discount_factor=0.9,
-    epsilon=0.1
+    discount_factor=0.9
 )
 
 # Train the model
@@ -183,7 +182,7 @@ def my_local_reward(local_state, global_state, local_action):
 The Q-function is updated using:
 
 ```
-Q(s,a) = r(s,a) + γ * E_{s',a'} [max Q(s',a')]
+Q(s,a) = r(s,a) + γ * E_{s'} [max_{a'} Q(s',a')]
 ```
 
 Where:
@@ -192,10 +191,14 @@ Where:
 - `r(s,a) = r_g(s_g, a_g) + (1/n) * Σ r_l(s_i, s_g, a_i)` is the composite reward
 - `γ` is the discount factor
 
+Expectation computation uses the known transition model. If the joint next-state space is small enough, we enumerate all `s'` exactly. Otherwise, we approximate with Monte Carlo samples. You can control this with:
+- `expectation_enumeration_limit` (default: 5000)
+- `expectation_num_samples` (default: 64)
+
 ### Training Process
 
 1. **Initialization**: Reset environment to initial states
-2. **Action Selection**: Use ε-greedy policy for exploration/exploitation
+2. **Action Selection**: Greedy policy (no exploration)
 3. **Environment Step**: Execute actions and observe rewards/next states
 4. **Q-Update**: Apply Bellman update equation
 5. **Metrics**: Track episode rewards and computation time
@@ -215,7 +218,6 @@ The implementation generates:
 The algorithm tracks:
 - Episode rewards
 - Computation time per episode
-- Exploration rate (epsilon) decay
 - Moving averages for performance assessment
 
 ## Contributing

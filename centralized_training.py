@@ -18,6 +18,21 @@ from base_classes import (
 )
 import itertools
 
+try:
+    from numba import jit, njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Fallback decorator
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 
 class CentralizedEnvironment:
     """Environment managing global and local agents with custom transitions and rewards."""
@@ -43,32 +58,41 @@ class CentralizedEnvironment:
             self.local_agents[i].reset(local_state)
     
     def step(self, global_action: Action, local_actions: List[Action]) -> Tuple[List[State], float]:
-        """Execute one step in the environment."""
+        """Execute one step in the environment.
+        Standard RL environment sequence:
+        1. Agent observes current state (before calling this method)
+        2. Agent chooses actions (passed as parameters to this method)
+        3. Environment computes reward for current state-action pair
+        4. Environment transitions to next state
+        5. Environment returns next state and reward to agent
+        """
         # Get current states
         current_global_state = self.global_agent.get_state()
         current_local_states = [agent.get_state() for agent in self.local_agents]
         
-        ###### something is weird here... getting reward before choosing actions?? should first choose actions then get rewards and finally transition states
-        # Compute reward
+        # Step 3: Compute reward for current state-action pair
+        # r(s,a) = r_g(s_g, a_g) + (1/n) * sum r_l(s_i, s_g, a_i)
         reward = self.compute_reward(current_global_state, global_action, 
                                    current_local_states, local_actions)
         
-        # Transition to next states
+        # Step 4: Transition to next states
+        # Global agent: s_g' ~ P_g(.|s_g, a_g)
         next_global_state = self.global_transition.sample_next_state(current_global_state, global_action)
-        next_local_states = []
         
-        # Local agent's state evolves as s_i' ~ P_l(.|s_i, s_g, a_i)
+        # Local agents: s_i' ~ P_l(.|s_i, s_g, a_i)
+        next_local_states = []
         for i, local_action in enumerate(local_actions):
             current_local_state = current_local_states[i]
             next_local_state = self.local_transition.sample_next_state(
                 current_local_state, current_global_state, local_action)
             next_local_states.append(next_local_state)
         
-        # Update agent states
+        # Update internal agent states for next iteration
         self.global_agent.set_state(next_global_state)
         for i, agent in enumerate(self.local_agents):
             agent.set_state(next_local_states[i])
         
+        # Step 5: Return next state and reward to agent
         return [next_global_state] + next_local_states, reward
     
     def compute_reward(self, global_state: State, global_action: Action, 
@@ -88,102 +112,220 @@ class CentralizedEnvironment:
         local_states = [agent.get_state() for agent in self.local_agents]
         return global_state, local_states
 
-
 class CentralizedQLearning:
     """Centralized Q-learning algorithm for multi-agent system."""
     def __init__(self, 
                 environment: CentralizedEnvironment,
-                learning_rate: float = 0.3,
-                discount_factor: float = 0.9,
-                epsilon: float = 0.1,
-                epsilon_decay: float = 0.995,
-                min_epsilon: float = 0.01):
+                discount_factor: float = 0.9):
         self.env = environment
-        self.lr = learning_rate
         self.gamma = discount_factor
-        self.epsilon = epsilon
-        self.epsilon_decay = epsilon_decay
-        self.min_epsilon = min_epsilon
         
-        # Q-table: Q(s, a) where s = (s_g, s_1, ..., s_n) and a = (a_g, a_1, ..., a_n)
-        self.q_table = defaultdict(float)
+        # Always use Monte Carlo sampling for expectation approximation
+        self.expectation_num_samples = 20
+        
+        # Create integer mappings for states and actions for fast NumPy indexing
+        self._create_state_action_mappings()
+        
+        # Q-table as NumPy array: Q[joint_state_idx, joint_action_idx]
+        self.q_table = np.zeros((self.n_joint_states, self.n_joint_actions))
         
         # Training metrics
         self.training_rewards = []
         self.training_times = []
         self.episodes_completed = 0
     
-    def get_state_action_key(self, states: List[State], actions: List[Action]) -> Tuple:
-        """Create hashable key for Q-table from states and actions."""
-        return (tuple(states), tuple(actions))
+    def _create_state_action_mappings(self):
+        """Create integer mappings for states and actions for fast NumPy indexing."""
+        # Global state/action mappings
+        self.global_state_to_idx = {state: i for i, state in enumerate(self.env.global_agent.state_space)}
+        self.global_action_to_idx = {action: i for i, action in enumerate(self.env.global_agent.action_space)}
+        
+        # Local state/action mappings (same for all agents)
+        self.local_state_to_idx = {state: i for i, state in enumerate(self.env.local_agents[0].state_space)}
+        self.local_action_to_idx = {action: i for i, action in enumerate(self.env.local_agents[0].action_space)}
+        
+        # Dimensions
+        self.n_global_states = len(self.env.global_agent.state_space)
+        self.n_global_actions = len(self.env.global_agent.action_space)
+        self.n_local_states = len(self.env.local_agents[0].state_space)
+        self.n_local_actions = len(self.env.local_agents[0].action_space)
+        self.n_agents = len(self.env.local_agents)
+        
+        # Joint space dimensions
+        self.n_joint_states = self.n_global_states * (self.n_local_states ** self.n_agents)
+        self.n_joint_actions = self.n_global_actions * (self.n_local_actions ** self.n_agents)
+        
+        # Precompute all valid joint actions for vectorization
+        self._precompute_joint_actions()
+        
+        # Precompute transition matrices for faster lookups
+        self._precompute_transition_matrices()
+    
+    def _precompute_joint_actions(self):
+        """Precompute all joint actions as integer arrays."""
+        joint_actions = []
+        for global_action in self.env.global_agent.action_space:
+            for local_action_combo in itertools.product(*[agent.action_space for agent in self.env.local_agents]):
+                g_idx = self.global_action_to_idx[global_action]
+                l_idxs = [self.local_action_to_idx[la] for la in local_action_combo]
+                joint_actions.append([g_idx] + l_idxs)
+        
+        self.joint_actions_array = np.array(joint_actions)  # Shape: (n_joint_actions, n_agents+1)
+    
+    def _precompute_transition_matrices(self):
+        """Precompute transition matrices for faster lookups."""
+        # Global transition matrix: [global_state, global_action] -> probability distribution
+        self.global_transition_matrix = np.zeros((self.n_global_states, self.n_global_actions, self.n_global_states))
+        
+        for (g_state, g_action), dist in self.env.global_transition.transition_probs.items():
+            g_state_idx = self.global_state_to_idx[g_state]
+            g_action_idx = self.global_action_to_idx[g_action]
+            for next_state, prob in dist.items():
+                next_state_idx = self.global_state_to_idx[next_state]
+                self.global_transition_matrix[g_state_idx, g_action_idx, next_state_idx] = prob
+        
+        # Local transition matrix: [local_state, global_state, local_action] -> probability distribution
+        self.local_transition_matrix = np.zeros((self.n_local_states, self.n_global_states, 
+                                               self.n_local_actions, self.n_local_states))
+        
+        for (l_state, g_state, l_action), dist in self.env.local_transition.transition_probs.items():
+            l_state_idx = self.local_state_to_idx[l_state]
+            g_state_idx = self.global_state_to_idx[g_state]
+            l_action_idx = self.local_action_to_idx[l_action]
+            for next_state, prob in dist.items():
+                next_l_state_idx = self.local_state_to_idx[next_state]
+                self.local_transition_matrix[l_state_idx, g_state_idx, l_action_idx, next_l_state_idx] = prob
+    
+    def get_state_idx(self, states: List[State]) -> int:
+        """Convert joint state to integer index."""
+        global_idx = self.global_state_to_idx[states[0]]
+        local_idxs = [self.local_state_to_idx[state] for state in states[1:]]
+        
+        # Joint state index calculation
+        joint_idx = global_idx
+        multiplier = self.n_global_states
+        for local_idx in local_idxs:
+            joint_idx += local_idx * multiplier
+            multiplier *= self.n_local_states
+        return joint_idx
+    
+    def get_action_idx(self, actions: List[Action]) -> int:
+        """Convert joint action to integer index."""
+        global_idx = self.global_action_to_idx[actions[0]]
+        local_idxs = [self.local_action_to_idx[action] for action in actions[1:]]
+        
+        # Joint action index calculation
+        joint_idx = global_idx
+        multiplier = self.n_global_actions
+        for local_idx in local_idxs:
+            joint_idx += local_idx * multiplier
+            multiplier *= self.n_local_actions
+        return joint_idx
     
     def get_all_actions(self) -> List[Tuple[Action, List[Action]]]:
-        """Get all possible action combinations."""
+        """Get all possible action combinations (for backward compatibility)."""
         all_actions = []
         for global_action in self.env.global_agent.action_space:
-            for local_action_combo in self._get_local_action_combinations():
-                all_actions.append((global_action, local_action_combo))
+            for local_action_combo in itertools.product(*[agent.action_space for agent in self.env.local_agents]):
+                all_actions.append((global_action, list(local_action_combo)))
         return all_actions
     
-    def _get_local_action_combinations(self) -> List[List[Action]]:
-        """Get all combinations of local actions."""
-        action_spaces = [agent.action_space for agent in self.env.local_agents]
-        return list(itertools.product(*action_spaces))
-    
     def select_action(self, states: List[State]) -> Tuple[Action, List[Action]]:
-        """Epsilon-greedy action selection."""
-        if np.random.random() < self.epsilon:
-            # Random action
-            global_action = np.random.choice(self.env.global_agent.action_space)
-            local_actions = [np.random.choice(agent.action_space) for agent in self.env.local_agents]
-            return global_action, local_actions
-        else:
-            # Greedy action
-            return self.get_best_action(states)
+        """Greedy action selection (no exploration) - vectorized."""
+        state_idx = self.get_state_idx(states)
+        
+        # Vectorized Q-value lookup for all actions
+        q_values = self.q_table[state_idx, :]
+        best_action_idx = np.argmax(q_values)
+        
+        # Convert back to action objects
+        joint_action_idxs = self.joint_actions_array[best_action_idx]
+        global_action = self.env.global_agent.action_space[joint_action_idxs[0]]
+        local_actions = [self.env.local_agents[i].action_space[joint_action_idxs[i+1]] 
+                        for i in range(self.n_agents)]
+        
+        return global_action, local_actions
     
     def get_best_action(self, states: List[State]) -> Tuple[Action, List[Action]]:
-        """Get action with highest Q-value."""
-        best_value = float('-inf')
-        best_action = None
-        
-        for global_action, local_actions in self.get_all_actions():
-            actions = [global_action] + list(local_actions)
-            state_action_key = self.get_state_action_key(states, actions)
-            q_value = self.q_table[state_action_key]
-            
-            if q_value > best_value:
-                best_value = q_value
-                best_action = (global_action, list(local_actions))
-        
-        if best_action is None:
-            # Fallback to random action
-            global_action = np.random.choice(self.env.global_agent.action_space)
-            local_actions = [np.random.choice(agent.action_space) for agent in self.env.local_agents]
-            return global_action, local_actions
-        
-        return best_action
+        """Get action with highest Q-value (alias for select_action)."""
+        return self.select_action(states)
     
     def update_q_value(self, states: List[State], actions: List[Action], 
                       reward: float, next_states: List[State]):
         """Bellman update: Q(s,a) = r(s,a) + gamma * E[max Q(s',a')]"""
-        current_key = self.get_state_action_key(states, actions)
+        # Unpack current state and action
+        global_state = states[0]
+        local_states = states[1:]
+        global_action = actions[0]
+        local_actions = actions[1:]
+
+        # Get transition probabilities using precomputed matrices
+        global_state_idx = self.global_state_to_idx[global_state]
+        global_action_idx = self.global_action_to_idx[global_action]
+        local_state_idxs = [self.local_state_to_idx[ls] for ls in local_states]
+        local_action_idxs = [self.local_action_to_idx[la] for la in local_actions]
         
-        # Find max Q-value for next state
-        max_next_q = float('-inf')
-        for global_action, local_actions in self.get_all_actions():
-            next_actions = [global_action] + list(local_actions)
-            next_key = self.get_state_action_key(next_states, next_actions)
-            next_q = self.q_table[next_key]
-            max_next_q = max(max_next_q, next_q)
+        # Check if transitions exist (non-zero probability mass)
+        g_transition_probs = self.global_transition_matrix[global_state_idx, global_action_idx, :]
+        missing = np.sum(g_transition_probs) == 0
         
-        if max_next_q == float('-inf'):
-            max_next_q = 0.0
+        if not missing:
+            for i, (ls_idx, la_idx) in enumerate(zip(local_state_idxs, local_action_idxs)):
+                l_transition_probs = self.local_transition_matrix[ls_idx, global_state_idx, la_idx, :]
+                if np.sum(l_transition_probs) == 0:
+                    missing = True
+                    break
         
-        # Bellman update
-        current_q = self.q_table[current_key]
-        updated_q = current_q + self.lr * (reward + self.gamma * max_next_q - current_q)
-        self.q_table[current_key] = updated_q
+        if missing:
+            # Fallback: use the observed next_states to compute a sample-based backup
+            next_state_idx = self.get_state_idx(next_states)
+            max_q = np.max(self.q_table[next_state_idx, :])
+            expected_max_next_q = max_q
+            
+            # Bellman update with sample-based backup
+            current_state_idx = self.get_state_idx(states)
+            current_action_idx = self.get_action_idx(actions)
+            self.q_table[current_state_idx, current_action_idx] = reward + self.gamma * expected_max_next_q
+            return
+
+        # Fully vectorized Monte Carlo approximation
+        # Sample global next states (batch)
+        valid_g_states = np.where(g_transition_probs > 0)[0]
+        valid_g_probs = g_transition_probs[valid_g_states]
+        valid_g_probs /= np.sum(valid_g_probs)  # Normalize
+        
+        sampled_g_idxs = np.random.choice(valid_g_states, size=self.expectation_num_samples, p=valid_g_probs)
+        
+        # Sample local next states (batch)
+        sampled_local_idxs_batch = np.zeros((self.expectation_num_samples, self.n_agents), dtype=int)
+        for agent_idx, (ls_idx, la_idx) in enumerate(zip(local_state_idxs, local_action_idxs)):
+            l_transition_probs = self.local_transition_matrix[ls_idx, global_state_idx, la_idx, :]
+            valid_l_states = np.where(l_transition_probs > 0)[0]
+            valid_l_probs = l_transition_probs[valid_l_states]
+            valid_l_probs /= np.sum(valid_l_probs)  # Normalize
+            
+            sampled_local_idxs_batch[:, agent_idx] = np.random.choice(
+                valid_l_states, size=self.expectation_num_samples, p=valid_l_probs
+            )
+        
+        # Vectorized joint state index calculation
+        joint_state_idxs = sampled_g_idxs.copy()
+        multiplier = self.n_global_states
+        for agent_idx in range(self.n_agents):
+            joint_state_idxs += sampled_local_idxs_batch[:, agent_idx] * multiplier
+            multiplier *= self.n_local_states
+        
+        # Vectorized max Q-value computation
+        max_q_samples = np.max(self.q_table[joint_state_idxs, :], axis=1)
+        expected_max_next_q = np.mean(max_q_samples)
+        
+        # Bellman update with expected backup
+        current_state_idx = self.get_state_idx(states)
+        current_action_idx = self.get_action_idx(actions)
+        self.q_table[current_state_idx, current_action_idx] = reward + self.gamma * expected_max_next_q
     
+
+
     def train_episode(self, initial_global_state: State, initial_local_states: List[State], 
                      max_steps: int = 100) -> float:
         """Train for one episode."""
@@ -209,9 +351,6 @@ class CentralizedQLearning:
             # Update Q-value
             self.update_q_value(current_states, current_actions, reward, next_states)
         
-        # Decay epsilon
-        self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
-        
         # Record metrics
         episode_time = time.time() - episode_start_time
         self.training_rewards.append(total_reward)
@@ -231,8 +370,7 @@ class CentralizedQLearning:
             if (episode + 1) % 100 == 0:
                 avg_reward = np.mean(self.training_rewards[-100:])
                 print(f"Episode {episode + 1}/{num_episodes}, "
-                      f"Average Reward (last 100): {avg_reward:.2f}, "
-                      f"Epsilon: {self.epsilon:.3f}")
+                      f"Average Reward (last 100): {avg_reward:.2f}")
         
         print("Training completed!")
         return {
@@ -284,16 +422,21 @@ class CentralizedQLearning:
     def save_model(self, filepath: str):
         """Save the trained Q-table and training metrics."""
         model_data = {
-            'q_table': dict(self.q_table),
+            'q_table': self.q_table,  # NumPy array
             'training_rewards': self.training_rewards,
             'training_times': self.training_times,
             'episodes_completed': self.episodes_completed,
             'parameters': {
-                'learning_rate': self.lr,
                 'discount_factor': self.gamma,
-                'epsilon': self.epsilon,
-                'epsilon_decay': self.epsilon_decay,
-                'min_epsilon': self.min_epsilon
+                'expectation_num_samples': self.expectation_num_samples
+            },
+            # Store mappings for reconstruction
+            'state_action_mappings': {
+                'n_global_states': self.n_global_states,
+                'n_global_actions': self.n_global_actions,
+                'n_local_states': self.n_local_states,
+                'n_local_actions': self.n_local_actions,
+                'n_agents': self.n_agents
             }
         }
         
@@ -306,18 +449,28 @@ class CentralizedQLearning:
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)
         
-        self.q_table = defaultdict(float, model_data['q_table'])
+        # Handle both old (dict) and new (NumPy) Q-table formats
+        if isinstance(model_data['q_table'], np.ndarray):
+            self.q_table = model_data['q_table']
+        else:
+            # Convert old dict format to NumPy array
+            old_q_table = model_data['q_table']
+            self.q_table = np.zeros((self.n_joint_states, self.n_joint_actions))
+            for (states, actions), value in old_q_table.items():
+                state_idx = self.get_state_idx(list(states))
+                action_idx = self.get_action_idx(list(actions))
+                self.q_table[state_idx, action_idx] = value
+        
         self.training_rewards = model_data['training_rewards']
         self.training_times = model_data['training_times']
         self.episodes_completed = model_data['episodes_completed']
         
-        # Load parameters
-        params = model_data['parameters']
-        self.lr = params['learning_rate']
-        self.gamma = params['discount_factor']
-        self.epsilon = params['epsilon']
-        self.epsilon_decay = params['epsilon_decay']
-        self.min_epsilon = params['min_epsilon']
+        # Load parameters (backward compatible)
+        params = model_data.get('parameters', {})
+        self.gamma = params.get('discount_factor', self.gamma)
+        self.expectation_num_samples = params.get(
+            'expectation_num_samples', getattr(self, 'expectation_num_samples', 20)
+        )
         
         print(f"Model loaded from {filepath}")
 
@@ -371,9 +524,11 @@ def create_simple_example():
     )
     
     # Create Q-learning algorithm
-    q_learner = CentralizedQLearning(env, learning_rate=0.3, discount_factor=0.9)
+    q_learner = CentralizedQLearning(env, discount_factor=0.9)
     
-    return q_learner, global_agent_states[0], [local_agent_states[0], local_agent_states[0]]
+    # Initialize ALL local agents with a valid starting state
+    initial_local_states = [local_agent_states[0] for _ in range(n)]
+    return q_learner, global_agent_states[0], initial_local_states
 
 
 if __name__ == "__main__":
@@ -384,7 +539,7 @@ if __name__ == "__main__":
     print("Starting training...")
     training_results = q_learner.train(
         initial_global_state, initial_local_states,
-        num_episodes=750, max_steps_per_episode=100
+        num_episodes=300, max_steps_per_episode=100
     )
     
     print("Plotting results...")
