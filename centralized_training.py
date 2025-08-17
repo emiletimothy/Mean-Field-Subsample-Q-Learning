@@ -68,6 +68,8 @@ class Q_function:
     def update_Q(self):
         """Update Q-function using Bellman equation with vectorized Monte Carlo expectation."""
         start_time = time.time()
+        Q_old = self.Q.copy()  # Use old Q-table for computing expected values
+        
         for global_agent_state in self.global_agent_state_space:
             for local_agent_states in itertools.product(self.local_agent_state_space, repeat=self.n):
                 for global_agent_action in self.global_agent_action_space:
@@ -94,7 +96,7 @@ class Q_function:
                             next_joint_state_sample = (next_global_state_sample,) + tuple(next_local_states_sample)
                             next_state_idx = self.get_state_idx(next_joint_state_sample)
                             
-                            max_q_next = np.max(self.Q[next_state_idx, :])
+                            max_q_next = np.max(Q_old[next_state_idx, :])
                             mc_samples[iter] = max_q_next
                         
                         expected_max_q = np.mean(mc_samples)
@@ -103,12 +105,12 @@ class Q_function:
         
         elapsed_time = time.time() - start_time
         total_updates = self.n_joint_states * self.n_joint_actions
-        print(f"Completed Q-value update in {elapsed_time:.3f} seconds")                        
 
     def learn(self, steps):
         print("Starting vectorized Q-learning update...")
         for step in range(steps):
             self.update_Q()
+        print("Completed Q-learning over {} steps".format(steps))
 
     def save_model(self, filepath):
         model_data = {
