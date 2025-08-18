@@ -12,7 +12,13 @@ def local_agent_reward(local_state, global_state, local_action):
     desired_spacing = 0  # Want to stay close to formation
     formation_reward = 1.0 - abs(local_state - desired_spacing)  # Higher reward for staying close to formation
     movement_reward = 0.5 - 0.1 * abs(local_action)  # Small penalty for movement, but base reward
-    return max(0.1, formation_reward + movement_reward)  # Ensure minimum positive reward
+    
+    # Incorporate global agent state - reward alignment with global agent
+    global_alignment_reward = 0.3 - 0.1 * abs(local_state - global_state)  # Reward for staying close to global agent
+    coordination_bonus = 0.2 if abs(local_state - global_state) <= 1 else 0  # Bonus for being within 1 unit of global agent
+    
+    total_reward = formation_reward + movement_reward + global_alignment_reward + coordination_bonus
+    return max(0.1, total_reward)  # Ensure minimum positive reward
 
 # global agent reward function
 def global_agent_reward(global_state, global_action):
@@ -55,39 +61,91 @@ def deployment_environment(H, k, n, q_func):
     current_joint_local_states = tuple(np.random.choice(Sl) for _ in range(n))
 
     for t in range(H):
-        # each agent samples n-1 other agents and plugs in their states in the Q-function to get the maximizing action tuple and then selects its index
+        # Each agent samples k-1 other agents and finds the action that maximizes Q-value
         joint_actions = []
         
         for i in range(n):
-            # sample n-1 other local agent states for agent i
+            # Sample k-1 other local agent states for agent i
             other_agents_indices = [j for j in range(n) if j != i]
-            sampled_other_states = [current_joint_local_states[j] for j in np.random.choice(other_agents_indices, k-1, replace=False)]
-        
-            # create a joint state with current global state, agent i's state, and sampled other states
-            joint_state_for_i = (current_global_state, current_joint_local_states[i]) + tuple(sampled_other_states)
+            if len(other_agents_indices) >= k-1:
+                sampled_indices = np.random.choice(other_agents_indices, k-1, replace=False)
+            else:
+                sampled_indices = other_agents_indices
             
-            # get state index for Q-function lookup
-            state_idx = q_func.get_state_idx(joint_state_for_i)
-            # find the action that maximizes Q-value for this state
-            best_action_idx = np.argmax(q_func.Q[state_idx, :])
-            best_joint_action = q_func.joint_actions[best_action_idx]
-            # extract agent i's action from the joint action
-            agent_i_action = best_joint_action[1]  # +1 because agent i's action is the 2nd element of the tuple
-            joint_actions.append(agent_i_action)
+            sampled_other_states = [current_joint_local_states[j] for j in sampled_indices]
+            
+            # Create mean-field state representation for this agent's perspective
+            # Count distribution including agent i and sampled others
+            local_state_dist = [0] * len(Sl)
+            # Add agent i's state
+            agent_i_state_idx = Sl.index(current_joint_local_states[i])
+            local_state_dist[agent_i_state_idx] += 1
+            # Add sampled other states
+            for other_state in sampled_other_states:
+                other_state_idx = Sl.index(other_state)
+                local_state_dist[other_state_idx] += 1
+            
+            # Keep the sampled distribution as-is (it already sums to k)
+            # No scaling needed since Q-function was trained on k agents
+            total_sampled = len(sampled_other_states) + 1  # This equals k
+            # local_state_dist already represents the k-agent distribution
+            
+            mean_field_state = (current_global_state, tuple(local_state_dist))
+            
+            # Find action that maximizes Q-value for this mean-field state
+            if mean_field_state in q_func.state_to_idx:
+                state_idx = q_func.get_state_idx(mean_field_state)
+                    
+                # Find the best action by checking all possible mean-field actions
+                best_q_value = float('-inf')
+                best_local_action = None
+                    
+                for action_idx, mean_field_action in enumerate(q_func.mean_field_actions):
+                    q_value = q_func.Q[state_idx, action_idx]
+                    if q_value > best_q_value:
+                        best_q_value = q_value
+                        # Extract the most common local action from this mean-field action
+                        local_action_dist = mean_field_action[1]
+                        best_local_action = Al[np.argmax(local_action_dist)]
+                    
+                joint_actions.append(best_local_action if best_local_action is not None else np.random.choice(Al))
+            else:
+                # Find nearest valid mean-field state
+                nearest_state = q_func._find_nearest_mean_field_state(mean_field_state)
+                if nearest_state:
+                    state_idx = q_func.get_state_idx(nearest_state)
+                    best_q_value = float('-inf')
+                    best_local_action = None
+                    for action_idx, mean_field_action in enumerate(q_func.mean_field_actions):
+                        q_value = q_func.Q[state_idx, action_idx]
+                        if q_value > best_q_value:
+                            best_q_value = q_value
+                            local_action_dist = mean_field_action[1]
+                            best_local_action = Al[np.argmax(local_action_dist)]
+                    joint_actions.append(best_local_action)
         
-        # global agent also selects action (simplified: random for now)
-        sampled_other_states = [current_joint_local_states[j] for j in np.random.choice([i for i in range(n)], k, replace=False)]
-        joint_state_for_global = (current_global_state,) + tuple(sampled_other_states)
-        state_idx = q_func.get_state_idx(joint_state_for_global)
+        # Global agent uses a k-sample of the population for decision making
+        sampled_global_indices = np.random.choice(range(n), k, replace=False)
+        sampled_global_states = [current_joint_local_states[j] for j in sampled_global_indices]
+        
+        global_state_dist = [0] * len(Sl)
+        for local_state in sampled_global_states:
+            state_idx = Sl.index(local_state)
+            global_state_dist[state_idx] += 1
+        
+        mean_field_state = (current_global_state, tuple(global_state_dist))
+        
+        state_idx = q_func.get_state_idx(mean_field_state)
         best_action_idx = np.argmax(q_func.Q[state_idx, :])
-        global_action = q_func.joint_actions[best_action_idx][0]
+        best_mean_field_action = q_func.mean_field_actions[best_action_idx]
+        global_action = best_mean_field_action[0]
     
         # the agents collect the reward r_t
         step_reward = 0
         for i in range(n):
             step_reward += local_agent_reward(current_joint_local_states[i], current_global_state, joint_actions[i]) / n
         step_reward += global_agent_reward(current_global_state, global_action)
-            
+        
         # the cumulative_reward is updated by adding gamma**t * r_t
         discounted_reward = (gamma ** t) * step_reward
         total_reward += discounted_reward
@@ -109,7 +167,7 @@ def deployment_environment(H, k, n, q_func):
 
 
 H = 200 # horizon of the game
-n = 7 # number of local agents
+n = 20 # number of local agents
 samples = 10 # number of samples
 gamma = 0.9 # discount factor
 T = 100 # number of learning steps
@@ -120,9 +178,8 @@ for k in range(2,n-1):
     q_func = Q_function(n=k, state_spaces=state_spaces, action_spaces=action_spaces, samples=samples, transition_system=transition_system, reward_system=reward_system, gamma=gamma)
     q_func.learn(steps=T)
     k_cum_rewards = []
-    for _ in range(5):
+    for _ in range(20):
         k_cum_rewards.append(deployment_environment(H, k, n, q_func))
-    # Convert to numpy array and take element-wise mean across runs
     k_cum_rewards = np.array(k_cum_rewards)
     k_cum_rewards_mean = np.mean(k_cum_rewards, axis=0)
     cum_rewards.append(k_cum_rewards_mean)
