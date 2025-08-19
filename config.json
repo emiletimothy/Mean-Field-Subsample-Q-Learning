@@ -1,0 +1,76 @@
+{
+  "environment": {
+    "global_agent": {
+      "state_space": [-2, -1, 0, 1, 2],
+      "action_space": [-2, -1, 0, 1, 2]
+    },
+    "local_agent": {
+      "state_space": [-1, 0, 1],
+      "action_space": [-1, 0, 1]
+    },
+    "functions": {
+      "local_agent_reward": [
+        "def local_agent_reward(local_state, global_state, local_action):",
+        "    # Multi-objective reward for local agents",
+        "    desired_spacing = 0  # Target formation position",
+        "    ",
+        "    # Formation reward: stay close to desired spacing",
+        "    formation_reward = 1.0 - abs(local_state - desired_spacing)",
+        "    ",
+        "    # Movement penalty: small cost for taking actions",
+        "    movement_reward = 0.5 - 0.1 * abs(local_action)",
+        "    ",
+        "    # Global alignment: coordinate with global agent position",
+        "    global_alignment_reward = 0.3 - 0.1 * abs(local_state - global_state)",
+        "    ",
+        "    # Coordination bonus: extra reward for tight formation",
+        "    coordination_bonus = 0.2 if abs(local_state - global_state) <= 1 else 0",
+        "    ",
+        "    # Combine all reward components",
+        "    total_reward = formation_reward + movement_reward + global_alignment_reward + coordination_bonus",
+        "    return max(0.1, total_reward)  # Ensure minimum positive reward"
+      ],
+      "global_agent_reward": [
+        "def global_agent_reward(global_state, global_action):",
+        "    # Reward function for the global agent",
+        "    base_reward = 1.0",
+        "    ",
+        "    # Action bonus: prefer staying still over movement",
+        "    action_bonus = 0.2 if global_action == 0 else 0.1",
+        "    ",
+        "    # State bonus: small reward based on state magnitude",
+        "    state_bonus = 0.1 * abs(global_state)",
+        "    ",
+        "    return base_reward + action_bonus + state_bonus"
+      ],
+      "local_agent_transition": [
+        "def local_agent_transition(local_state, global_state, local_action):",
+        "    # Local agent transitions relative to global agent",
+        "    new_state = local_state + local_action - global_state",
+        "    ",
+        "    # Clamp to state space bounds [-1, 1]",
+        "    return max(-1, min(1, new_state))"
+      ],
+      "global_agent_transition": [
+        "def global_agent_transition(global_state, global_action):",
+        "    # Simple additive transition for global agent",
+        "    new_state = global_state + global_action",
+        "    ",
+        "    # Clamp to state space bounds [-2, 2]",
+        "    return max(-2, min(2, new_state))"
+      ]
+    }
+  },
+  "simulation": {
+    "horizon": 200,
+    "num_local_agents": 14,
+    "monte_carlo_samples": 10,
+    "discount_factor": 0.9,
+    "training_steps": 100,
+    "deployment_runs": 20
+  },
+  "visualization": {
+    "save_plot": true,
+    "plot_filename": "cumulative_rewards.png"
+  }
+}

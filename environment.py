@@ -2,51 +2,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from centralized_training import Q_function
 import matplotlib.pyplot as plt
-
-# Let's get the local agents to balance around the global agent
-
-# Environment: feel free to modify
-
-# local agent reward function
-def local_agent_reward(local_state, global_state, local_action):
-    desired_spacing = 0  # Want to stay close to formation
-    formation_reward = 1.0 - abs(local_state - desired_spacing)  # Higher reward for staying close to formation
-    movement_reward = 0.5 - 0.1 * abs(local_action)  # Small penalty for movement, but base reward
-    
-    # Incorporate global agent state - reward alignment with global agent
-    global_alignment_reward = 0.3 - 0.1 * abs(local_state - global_state)  # Reward for staying close to global agent
-    coordination_bonus = 0.2 if abs(local_state - global_state) <= 1 else 0  # Bonus for being within 1 unit of global agent
-    
-    total_reward = formation_reward + movement_reward + global_alignment_reward + coordination_bonus
-    return max(0.1, total_reward)  # Ensure minimum positive reward
-
-# global agent reward function
-def global_agent_reward(global_state, global_action):
-    base_reward = 1.0
-    action_bonus = 0.2 if global_action == 0 else 0.1  # Bonus for staying still
-    state_bonus = 0.1 * abs(global_state)  # Small bonus based on state magnitude
-    return base_reward + action_bonus + state_bonus
-
-# local agent transition function
-def local_agent_transition(local_state, global_state, local_action):
-    new_state = local_state + local_action - global_state
-    return max(-1, min(1, new_state))  # Clamp to state space bounds
-
-# global agent transition function
-def global_agent_transition(global_state, global_action):
-    new_state = global_state + global_action
-    return max(-2, min(2, new_state))  # Clamp to state space bounds
-
-Sg = [-2, -1, 0, 1, 2] # global agent state space
-Sl = [-1, 0, 1] # local agent state space
-state_spaces = [Sl, Sg] # state spaces
-
-Ag = [-2, -1, 0, 1, 2] # global agent action space
-Al = [-1, 0, 1] # local agent action space
-action_spaces = [Al, Ag] # action spaces
-
-transition_system = [global_agent_transition, local_agent_transition] # transition system
-reward_system = [global_agent_reward, local_agent_reward] # reward system
+import json
 
 # helper functions for deployment
 def random_state_sample(state_tuple, k):
@@ -166,19 +122,41 @@ def deployment_environment(H, k, n, q_func):
     return cumulative_rewards
 
 
-H = 200 # horizon of the game
-n = 20 # number of local agents
-samples = 10 # number of samples
-gamma = 0.9 # discount factor
-T = 100 # number of learning steps
+# Load configuration from JSON file
+with open('config.json', 'r') as f:
+    config = json.load(f)
+
+# Extract environment parameters
+Sg = config['environment']['global_agent']['state_space']
+Sl = config['environment']['local_agent']['state_space']
+Ag = config['environment']['global_agent']['action_space']
+Al = config['environment']['local_agent']['action_space']
+
+# Execute function definitions from config
+for func_name, func_lines in config['environment']['functions'].items():
+    func_code = '\n'.join(func_lines)
+    exec(func_code)
+
+state_spaces = [Sl, Sg]
+action_spaces = [Al, Ag]
+transition_system = [global_agent_transition, local_agent_transition]
+reward_system = [global_agent_reward, local_agent_reward]
+
+# Extract simulation parameters
+H = config['simulation']['horizon']
+n = config['simulation']['num_local_agents']
+samples = config['simulation']['monte_carlo_samples']
+gamma = config['simulation']['discount_factor']
+T = config['simulation']['training_steps']
+deployment_runs = config['simulation']['deployment_runs']
 
 cum_rewards = []
 plt.figure()
-for k in range(2,n-1):
+for k in range(2,n+1):
     q_func = Q_function(n=k, state_spaces=state_spaces, action_spaces=action_spaces, samples=samples, transition_system=transition_system, reward_system=reward_system, gamma=gamma)
     q_func.learn(steps=T)
     k_cum_rewards = []
-    for _ in range(20):
+    for _ in range(deployment_runs):
         k_cum_rewards.append(deployment_environment(H, k, n, q_func))
     k_cum_rewards = np.array(k_cum_rewards)
     k_cum_rewards_mean = np.mean(k_cum_rewards, axis=0)
@@ -189,4 +167,7 @@ plt.title("Cumulative Rewards for k=2 to k={}".format(n-1))
 plt.xlabel("Time-step")
 plt.ylabel("Cumulative Reward")
 plt.legend()
+
+if config['visualization']['save_plot']:
+    plt.savefig(config['visualization']['plot_filename'])
 plt.show()

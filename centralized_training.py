@@ -53,7 +53,6 @@ class Q_function:
         
         self.n_joint_actions = len(self.mean_field_actions)
         print(f"Mean-field Q-table: {self.n_joint_states} states x {self.n_joint_actions} actions")
-        print(f"State space reduction: {5 * (3**self.n)} -> {self.n_joint_states} ({5 * (3**self.n) / self.n_joint_states:.1f}x smaller)")
     
     def _generate_distributions(self, n_agents, n_states):
         """Generate all possible ways to distribute n_agents across n_states."""        
@@ -187,7 +186,6 @@ class Q_function:
     def _fast_monte_carlo_sampling(self, Q_old):
         """Mean-field Monte Carlo sampling for expected Q-values."""
         expected_values = np.zeros((self.n_joint_states, self.n_joint_actions), dtype=np.float32)
-        reduced_samples = max(3, self.samples // 3)
         
         for state_idx, mean_field_state in enumerate(self.mean_field_states):
             global_state = mean_field_state[0]
@@ -202,7 +200,7 @@ class Q_function:
                     next_state_indices = self._transition_cache[cache_key]
                 else:
                     next_state_indices = []
-                    for _ in range(reduced_samples):
+                    for _ in range(self.samples):
                         next_global_state = self.global_agent_transition_function(global_state, global_action)
                         next_local_dist = self._sample_next_local_distribution(
                             local_state_dist, local_action_dist, global_state
