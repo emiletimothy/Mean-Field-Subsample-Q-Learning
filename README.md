@@ -1,4 +1,4 @@
-# Mean-Field Subsample Q-Learning for Multi-Agent Systems
+# Mean-Field Subsample Q-Learning for Multi-Agent Reinforcement Learning
 
 This repository implements a scalable **Mean-Field Subsample Q-Learning** algorithm for multi-agent reinforcement learning. The system uses mean-field approximations to handle large populations while allowing agents to sample only k neighbors for computational efficiency.
 
